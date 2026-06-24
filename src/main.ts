@@ -228,7 +228,7 @@ const render = () => {
     </section>
 
     <section class="controls card" aria-label="Управление воспроизведением">
-      <button class="primary" data-action="toggle-play">${state.isPlaying ? "Плавная пауза" : "Включить музыку"}</button>
+      <button class="primary" data-action="toggle-play">${state.isPlaying ? "Пауза сразу" : "Включить музыку"}</button>
       <button data-action="next">Мягко сменить</button>
     </section>
 
@@ -267,6 +267,17 @@ const render = () => {
         ).join("")}
       </div>
     </section>
+
+    <section class="card contact" aria-label="Контакты для связи">
+      <div>
+        <p class="label">Связь</p>
+        <p class="queue-title">Если хочется написать про проект</p>
+      </div>
+      <div class="contact-links">
+        <a href="mailto:killrealllll0372@gmail.com">killrealllll0372@gmail.com</a>
+        <a href="https://t.me/papitalist" target="_blank" rel="noreferrer">Telegram: @papitalist</a>
+      </div>
+    </section>
   `;
 
   bindControls();
@@ -299,7 +310,16 @@ const playCurrentTrack = async () => {
 };
 
 const pausePlayback = () => {
-  fadeOutAndStop({ clearTimer: false, resetPosition: false });
+  ++transitionToken;
+  audioPlayers.forEach((player) => {
+    stopAndResetAudio(player, false);
+  });
+  state.isPlaying = false;
+  state.isFadingOut = false;
+  state.isCrossfading = false;
+  stopPlaybackClock(false);
+  persistState();
+  render();
 };
 
 const fadeOutAndStop = ({

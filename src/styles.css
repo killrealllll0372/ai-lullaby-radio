@@ -192,12 +192,33 @@ h2 {
 }
 
 .queue,
+.contact,
 .playback-time,
 .timer-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 1rem;
+}
+
+.contact {
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+
+.contact-links {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.contact-links a {
+  color: #f9e7dc;
+  text-decoration-color: rgba(249, 231, 220, 0.38);
+  text-underline-offset: 0.25rem;
+}
+
+.contact-links a:hover {
+  text-decoration-color: rgba(249, 231, 220, 0.78);
 }
 
 .queue-title,
@@ -226,6 +247,7 @@ input[type="range"] {
 }
 
 .catalog p:last-child,
+.contact p:last-child,
 .fieldset p:last-child,
 .playback-time p:last-child,
 .queue p:last-child {
