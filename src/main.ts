@@ -7,6 +7,7 @@ const DEFAULT_VOLUME = 0.34;
 const FADE_IN_MS = 1800;
 const CROSSFADE_MS = 7000;
 const FADE_OUT_MS = 8000;
+const CROSSFADE_LOOKAHEAD_SECONDS = CROSSFADE_MS / 1000;
 const STORAGE_KEY = "ai-lullaby-radio-state";
 
 type StoredState = {
@@ -36,6 +37,11 @@ const audioPlayers = [new Audio(), new Audio()] as const;
 
 audioPlayers.forEach((player) => {
   player.preload = "metadata";
+  player.controls = false;
+  player.setAttribute("playsinline", "");
+  player.setAttribute("aria-hidden", "true");
+  player.style.display = "none";
+  document.body.appendChild(player);
 });
 
 const readStoredState = (): StoredState => {
@@ -68,6 +74,8 @@ let timerInterval: number | null = null;
 let playbackInterval: number | null = null;
 let activeAudioIndex = 0;
 let transitionToken = 0;
+let crossfadeDeadline = 0;
+let crossfadeTimeout: number | null = null;
 const volumeRampIntervals = new WeakMap<HTMLAudioElement, number>();
 
 const persistState = () => {
@@ -109,6 +117,34 @@ const formatPlaybackTime = (milliseconds: number) => {
 const setAudioSource = (player: HTMLAudioElement, trackIndex: number) => {
   player.src = tracks[trackIndex].url;
   player.load();
+};
+
+const updateMediaSession = () => {
+  if (!("mediaSession" in navigator) || !("MediaMetadata" in window)) {
+    return;
+  }
+
+  navigator.mediaSession.metadata = new MediaMetadata({
+    title: "Спокойная музыка",
+    artist: "AI-радио колыбельных",
+    album: "Мягкая очередь для сна",
+  });
+  navigator.mediaSession.playbackState = state.isPlaying ? "playing" : "paused";
+};
+
+const setMediaSessionActionHandler = (
+  action: MediaSessionAction,
+  handler: MediaSessionActionHandler,
+) => {
+  if (!("mediaSession" in navigator)) {
+    return;
+  }
+
+  try {
+    navigator.mediaSession.setActionHandler(action, handler);
+  } catch {
+    // Some browsers expose Media Session but do not support every action.
+  }
 };
 
 const clearVolumeRamp = (player: HTMLAudioElement) => {
@@ -154,6 +190,29 @@ const stopAndResetAudio = (player: HTMLAudioElement, shouldResetPosition = true)
   if (shouldResetPosition) {
     player.currentTime = 0;
   }
+};
+
+const clearCrossfadeTimeout = () => {
+  if (crossfadeTimeout !== null) {
+    window.clearTimeout(crossfadeTimeout);
+    crossfadeTimeout = null;
+  }
+};
+
+const finishCrossfade = (token: number, fromPlayer?: HTMLAudioElement) => {
+  if (token !== transitionToken) {
+    return;
+  }
+
+  if (fromPlayer) {
+    stopAndResetAudio(fromPlayer);
+  }
+
+  state.isCrossfading = false;
+  crossfadeDeadline = 0;
+  clearCrossfadeTimeout();
+  updateMediaSession();
+  render();
 };
 
 const clearPlaybackInterval = () => {
@@ -281,6 +340,7 @@ const render = () => {
   `;
 
   bindControls();
+  updateMediaSession();
 };
 
 const playCurrentTrack = async () => {
@@ -289,6 +349,8 @@ const playCurrentTrack = async () => {
 
   state.isFadingOut = false;
   state.isCrossfading = false;
+  crossfadeDeadline = 0;
+  clearCrossfadeTimeout();
   audioPlayers.forEach((audioPlayer) => {
     if (audioPlayer !== player) {
       stopAndResetAudio(audioPlayer);
@@ -306,11 +368,14 @@ const playCurrentTrack = async () => {
   startPlaybackClock();
   rampVolume(player, state.targetVolume, FADE_IN_MS);
   persistState();
+  updateMediaSession();
   render();
 };
 
 const pausePlayback = () => {
   ++transitionToken;
+  crossfadeDeadline = 0;
+  clearCrossfadeTimeout();
   audioPlayers.forEach((player) => {
     stopAndResetAudio(player, false);
   });
@@ -319,6 +384,7 @@ const pausePlayback = () => {
   state.isCrossfading = false;
   stopPlaybackClock(false);
   persistState();
+  updateMediaSession();
   render();
 };
 
@@ -338,6 +404,8 @@ const fadeOutAndStop = ({
 
   state.isFadingOut = true;
   state.isCrossfading = false;
+  crossfadeDeadline = 0;
+  clearCrossfadeTimeout();
   render();
 
   audioPlayers.forEach((audioPlayer) => {
@@ -361,11 +429,16 @@ const fadeOutAndStop = ({
       clearTimerInterval();
     }
     persistState();
+    updateMediaSession();
     render();
   });
 };
 
 const playNextTrack = async () => {
+  if (state.isCrossfading || state.isFadingOut) {
+    return;
+  }
+
   const nextIndex = getNextIndex();
 
   if (!state.isPlaying) {
@@ -384,6 +457,8 @@ const playNextTrack = async () => {
   state.currentIndex = nextIndex;
   state.isFadingOut = false;
   state.isCrossfading = true;
+  crossfadeDeadline = Date.now() + CROSSFADE_MS + 500;
+  clearCrossfadeTimeout();
   persistState();
   setAudioSource(toPlayer, state.currentIndex);
   toPlayer.volume = 0;
@@ -398,17 +473,44 @@ const playNextTrack = async () => {
   render();
 
   rampVolume(fromPlayer, 0, CROSSFADE_MS, () => {
-    if (token === transitionToken) {
-      stopAndResetAudio(fromPlayer);
-    }
+    finishCrossfade(token, fromPlayer);
   });
 
   rampVolume(toPlayer, state.targetVolume, CROSSFADE_MS, () => {
-    if (token === transitionToken) {
-      state.isCrossfading = false;
-      render();
-    }
+    finishCrossfade(token);
   });
+
+  crossfadeTimeout = window.setTimeout(() => {
+    finishCrossfade(token, fromPlayer);
+  }, CROSSFADE_MS + 500);
+};
+
+const maybeStartAutomaticCrossfade = (player: HTMLAudioElement) => {
+  if (state.isCrossfading && crossfadeDeadline > 0 && Date.now() >= crossfadeDeadline) {
+    finishCrossfade(transitionToken);
+  }
+
+  if (
+    player !== getActiveAudio() ||
+    !state.isPlaying ||
+    state.isCrossfading ||
+    state.isFadingOut ||
+    !Number.isFinite(player.duration) ||
+    player.duration <= CROSSFADE_LOOKAHEAD_SECONDS
+  ) {
+    return;
+  }
+
+  const remainingSeconds = player.duration - player.currentTime;
+
+  if (remainingSeconds <= CROSSFADE_LOOKAHEAD_SECONDS) {
+    playNextTrack().catch(() => {
+      state.isPlaying = false;
+      state.isCrossfading = false;
+      updateMediaSession();
+      render();
+    });
+  }
 };
 
 const clearTimerInterval = () => {
@@ -496,16 +598,38 @@ const bindControls = () => {
 };
 
 audioPlayers.forEach((player) => {
+  player.addEventListener("timeupdate", () => {
+    maybeStartAutomaticCrossfade(player);
+  });
+
   player.addEventListener("ended", () => {
-    if (player !== getActiveAudio() || state.isFadingOut) {
+    if (player !== getActiveAudio() || state.isFadingOut || state.isCrossfading) {
       return;
     }
 
     playNextTrack().catch(() => {
       state.isPlaying = false;
       state.isCrossfading = false;
+      updateMediaSession();
       render();
     });
+  });
+});
+
+setMediaSessionActionHandler("play", () => {
+  playCurrentTrack().catch(() => {
+    state.isPlaying = false;
+    updateMediaSession();
+    render();
+  });
+});
+setMediaSessionActionHandler("pause", pausePlayback);
+setMediaSessionActionHandler("stop", pausePlayback);
+setMediaSessionActionHandler("nexttrack", () => {
+  playNextTrack().catch(() => {
+    state.isPlaying = false;
+    updateMediaSession();
+    render();
   });
 });
 
