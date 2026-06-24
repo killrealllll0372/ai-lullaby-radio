@@ -1,17 +1,13 @@
-import { catalogSummary, tracks, type Track } from "./catalog";
+import { catalogSummary, tracks } from "./catalog";
 import "./styles.css";
 
 const TIMER_OPTIONS_MINUTES = [10, 20, 30, 45, 60] as const;
 const MAX_VOLUME = 0.72;
 const DEFAULT_VOLUME = 0.34;
 const FADE_IN_MS = 1800;
-const FADE_OUT_MS = 12000;
+const CROSSFADE_MS = 7000;
+const FADE_OUT_MS = 8000;
 const STORAGE_KEY = "ai-lullaby-radio-state";
-const TRACK_TAG_LABELS = {
-  calm: "спокойно",
-  soft: "мягко",
-  sleep: "для сна",
-} satisfies Record<Track["tags"][number], string>;
 
 type StoredState = {
   currentIndex?: number;
@@ -25,6 +21,7 @@ type PlayerState = {
   timerEndsAt: number | null;
   remainingMs: number | null;
   isFadingOut: boolean;
+  isCrossfading: boolean;
 };
 
 const app = document.querySelector<HTMLDivElement>("#app");
@@ -33,8 +30,11 @@ if (!app) {
   throw new Error("App root was not found.");
 }
 
-const audio = new Audio();
-audio.preload = "metadata";
+const audioPlayers = [new Audio(), new Audio()] as const;
+
+audioPlayers.forEach((player) => {
+  player.preload = "metadata";
+});
 
 const readStoredState = (): StoredState => {
   try {
@@ -57,10 +57,13 @@ const state: PlayerState = {
   timerEndsAt: null,
   remainingMs: null,
   isFadingOut: false,
+  isCrossfading: false,
 };
 
 let timerInterval: number | null = null;
-let volumeRampInterval: number | null = null;
+let activeAudioIndex = 0;
+let transitionToken = 0;
+const volumeRampIntervals = new WeakMap<HTMLAudioElement, number>();
 
 const persistState = () => {
   const nextState: StoredState = {
@@ -70,19 +73,11 @@ const persistState = () => {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(nextState));
 };
 
-const getCurrentTrack = () => tracks[state.currentIndex];
-
 const getNextIndex = () => (state.currentIndex + 1) % tracks.length;
 
-const getNextTrack = () => tracks[getNextIndex()];
+const getActiveAudio = () => audioPlayers[activeAudioIndex];
 
-const formatDuration = (seconds: number) => {
-  const minutes = Math.floor(seconds / 60);
-  const remainingSeconds = Math.round(seconds % 60)
-    .toString()
-    .padStart(2, "0");
-  return `${minutes}:${remainingSeconds}`;
-};
+const getInactiveAudioIndex = () => (activeAudioIndex + 1) % audioPlayers.length;
 
 const formatRemaining = (milliseconds: number | null) => {
   if (milliseconds === null) {
@@ -97,69 +92,92 @@ const formatRemaining = (milliseconds: number | null) => {
   return `${minutes}:${seconds}`;
 };
 
-const setAudioSource = (track: Track) => {
-  audio.src = track.url;
-  audio.load();
+const setAudioSource = (player: HTMLAudioElement, trackIndex: number) => {
+  player.src = tracks[trackIndex].url;
+  player.load();
 };
 
-const clearVolumeRamp = () => {
-  if (volumeRampInterval !== null) {
-    window.clearInterval(volumeRampInterval);
-    volumeRampInterval = null;
+const clearVolumeRamp = (player: HTMLAudioElement) => {
+  const interval = volumeRampIntervals.get(player);
+
+  if (interval !== undefined) {
+    window.clearInterval(interval);
+    volumeRampIntervals.delete(player);
   }
 };
 
-const rampVolume = (targetVolume: number, durationMs: number, onDone?: () => void) => {
-  clearVolumeRamp();
+const rampVolume = (
+  player: HTMLAudioElement,
+  targetVolume: number,
+  durationMs: number,
+  onDone?: () => void,
+) => {
+  clearVolumeRamp(player);
 
-  const startVolume = audio.volume;
+  const startVolume = player.volume;
   const startedAt = performance.now();
 
-  volumeRampInterval = window.setInterval(() => {
+  const interval = window.setInterval(() => {
     const elapsed = performance.now() - startedAt;
     const progress = clamp(elapsed / durationMs, 0, 1);
-    audio.volume = startVolume + (targetVolume - startVolume) * progress;
+    player.volume = startVolume + (targetVolume - startVolume) * progress;
 
     if (progress >= 1) {
-      clearVolumeRamp();
-      audio.volume = targetVolume;
+      clearVolumeRamp(player);
+      player.volume = targetVolume;
       onDone?.();
     }
   }, 80);
+
+  volumeRampIntervals.set(player, interval);
+};
+
+const stopAndResetAudio = (player: HTMLAudioElement, shouldResetPosition = true) => {
+  clearVolumeRamp(player);
+  player.pause();
+  player.volume = 0;
+
+  if (shouldResetPosition) {
+    player.currentTime = 0;
+  }
 };
 
 const render = () => {
-  const currentTrack = getCurrentTrack();
-  const nextTrack = getNextTrack();
-  const currentTrackTags = currentTrack.tags.map((tag) => TRACK_TAG_LABELS[tag]).join(" · ");
+  const playbackStatus = state.isFadingOut
+    ? "Плавно затихает"
+    : state.isCrossfading
+      ? "Мягко сменяется"
+      : state.isPlaying
+        ? "Тихо играет"
+        : "Готово к вечеру";
 
   app.innerHTML = `
     <section class="hero" aria-labelledby="title">
-      <p class="eyebrow">локальное радио для сна</p>
+      <p class="eyebrow">спокойный сон без суеты</p>
       <h1 id="title">AI-радио колыбельных</h1>
-      <p class="subtitle">Тихая и предсказуемая очередь для вечернего прослушивания из локального MP3-каталога.</p>
+      <p class="subtitle">Тихая предсказуемая музыка для засыпания маленького ребенка: включите, выберите комфортную громкость и поставьте таймер.</p>
     </section>
 
     <section class="card now-playing" aria-label="Сейчас играет">
       <div>
-        <p class="label">Текущий трек</p>
-        <h2>${currentTrack.title}</h2>
-        <p class="muted">${formatDuration(currentTrack.duration)} · ${currentTrackTags}</p>
+        <p class="label">Сейчас</p>
+        <h2>Спокойная музыка</h2>
+        <p class="muted">Мягкие переходы без резких пауз и скачков громкости.</p>
       </div>
-      <div class="status-pill">${state.isPlaying ? "Тихо играет" : "На паузе"}</div>
+      <div class="status-pill">${playbackStatus}</div>
     </section>
 
     <section class="controls card" aria-label="Управление воспроизведением">
-      <button class="primary" data-action="toggle-play">${state.isPlaying ? "Пауза" : "Включить"}</button>
-      <button data-action="next">Следующий трек</button>
+      <button class="primary" data-action="toggle-play">${state.isPlaying ? "Плавная пауза" : "Включить музыку"}</button>
+      <button data-action="next">Мягко сменить</button>
     </section>
 
     <section class="card queue" aria-label="Очередь">
       <div>
-        <p class="label">Следующий трек</p>
-        <p class="queue-title">${nextTrack.title}</p>
+        <p class="label">Дальше</p>
+        <p class="queue-title">Следующая мягкая композиция</p>
       </div>
-      <p class="muted">Спокойный порядок · без резких случайных переходов</p>
+      <p class="muted">Спокойный порядок без случайных резких смен.</p>
     </section>
 
     <section class="card fieldset" aria-label="Громкость">
@@ -191,9 +209,9 @@ const render = () => {
     </section>
 
     <section class="card catalog" aria-label="Каталог">
-      <p class="label">Каталог</p>
-      <p>Загружено локальных MP3-треков: ${catalogSummary.availableTrackCount}.</p>
-      <p class="muted">${catalogSummary.limitation}</p>
+      <p class="label">Набор музыки</p>
+      <p>Набор колыбельных готов: ${catalogSummary.availableTrackCount} спокойных композиций.</p>
+      <p class="muted">Названия скрыты, чтобы экран оставался простым и не отвлекал перед сном.</p>
     </section>
   `;
 
@@ -201,53 +219,120 @@ const render = () => {
 };
 
 const playCurrentTrack = async () => {
+  const token = ++transitionToken;
+  const player = getActiveAudio();
+
   state.isFadingOut = false;
-  setAudioSource(getCurrentTrack());
-  audio.volume = 0;
-  await audio.play();
+  state.isCrossfading = false;
+  audioPlayers.forEach((audioPlayer) => {
+    if (audioPlayer !== player) {
+      stopAndResetAudio(audioPlayer);
+    }
+  });
+  setAudioSource(player, state.currentIndex);
+  player.volume = 0;
+  await player.play();
+
+  if (token !== transitionToken) {
+    return;
+  }
+
   state.isPlaying = true;
-  rampVolume(state.targetVolume, FADE_IN_MS);
+  rampVolume(player, state.targetVolume, FADE_IN_MS);
   persistState();
   render();
 };
 
 const pausePlayback = () => {
-  audio.pause();
-  state.isPlaying = false;
-  state.isFadingOut = false;
-  clearVolumeRamp();
-  persistState();
-  render();
+  fadeOutAndStop({ clearTimer: false, resetPosition: false });
 };
 
-const fadeOutAndStop = () => {
+const fadeOutAndStop = ({
+  clearTimer,
+  resetPosition,
+}: {
+  clearTimer: boolean;
+  resetPosition: boolean;
+}) => {
   if (state.isFadingOut) {
     return;
   }
 
+  const token = ++transitionToken;
+  const player = getActiveAudio();
+
   state.isFadingOut = true;
-  rampVolume(0, FADE_OUT_MS, () => {
-    audio.pause();
-    audio.currentTime = 0;
+  state.isCrossfading = false;
+  render();
+
+  audioPlayers.forEach((audioPlayer) => {
+    if (audioPlayer !== player) {
+      stopAndResetAudio(audioPlayer);
+    }
+  });
+
+  rampVolume(player, 0, FADE_OUT_MS, () => {
+    if (token !== transitionToken) {
+      return;
+    }
+
+    stopAndResetAudio(player, resetPosition);
     state.isPlaying = false;
     state.isFadingOut = false;
-    state.timerEndsAt = null;
-    state.remainingMs = null;
-    clearTimerInterval();
+    if (clearTimer) {
+      state.timerEndsAt = null;
+      state.remainingMs = null;
+      clearTimerInterval();
+    }
+    persistState();
     render();
   });
 };
 
 const playNextTrack = async () => {
-  state.currentIndex = getNextIndex();
-  persistState();
+  const nextIndex = getNextIndex();
 
-  if (state.isPlaying) {
-    await playCurrentTrack();
-  } else {
-    setAudioSource(getCurrentTrack());
+  if (!state.isPlaying) {
+    state.currentIndex = nextIndex;
+    setAudioSource(getActiveAudio(), state.currentIndex);
+    persistState();
     render();
+    return;
   }
+
+  const token = ++transitionToken;
+  const fromPlayer = getActiveAudio();
+  const toIndex = getInactiveAudioIndex();
+  const toPlayer = audioPlayers[toIndex];
+
+  state.currentIndex = nextIndex;
+  state.isFadingOut = false;
+  state.isCrossfading = true;
+  persistState();
+  setAudioSource(toPlayer, state.currentIndex);
+  toPlayer.volume = 0;
+  await toPlayer.play();
+
+  if (token !== transitionToken) {
+    stopAndResetAudio(toPlayer);
+    return;
+  }
+
+  activeAudioIndex = toIndex;
+  render();
+
+  rampVolume(fromPlayer, 0, CROSSFADE_MS, () => {
+    if (token === transitionToken) {
+      stopAndResetAudio(fromPlayer);
+    }
+  });
+
+  rampVolume(toPlayer, state.targetVolume, CROSSFADE_MS, () => {
+    if (token === transitionToken) {
+      state.isCrossfading = false;
+      render();
+    }
+  });
 };
 
 const clearTimerInterval = () => {
@@ -266,7 +351,7 @@ const updateTimer = () => {
   state.remainingMs = Math.max(0, state.timerEndsAt - Date.now());
 
   if (state.remainingMs <= 0) {
-    fadeOutAndStop();
+    fadeOutAndStop({ clearTimer: true, resetPosition: true });
   }
 
   render();
@@ -296,6 +381,8 @@ const bindControls = () => {
 
     playCurrentTrack().catch(() => {
       state.isPlaying = false;
+      state.isCrossfading = false;
+      state.isFadingOut = false;
       render();
     });
   });
@@ -303,6 +390,8 @@ const bindControls = () => {
   app.querySelector<HTMLButtonElement>('[data-action="next"]')?.addEventListener("click", () => {
     playNextTrack().catch(() => {
       state.isPlaying = false;
+      state.isCrossfading = false;
+      state.isFadingOut = false;
       render();
     });
   });
@@ -310,7 +399,13 @@ const bindControls = () => {
   app.querySelector<HTMLInputElement>("#volume")?.addEventListener("input", (event) => {
     const input = event.target as HTMLInputElement;
     state.targetVolume = clamp(Number(input.value), 0, MAX_VOLUME);
-    rampVolume(state.targetVolume, 700);
+    const activePlayer = getActiveAudio();
+    rampVolume(activePlayer, state.targetVolume, 700, () => {
+      if (state.isCrossfading) {
+        state.isCrossfading = false;
+        render();
+      }
+    });
     persistState();
     render();
   });
@@ -324,13 +419,20 @@ const bindControls = () => {
   });
 };
 
-audio.addEventListener("ended", () => {
-  playNextTrack().catch(() => {
-    state.isPlaying = false;
-    render();
+audioPlayers.forEach((player) => {
+  player.addEventListener("ended", () => {
+    if (player !== getActiveAudio() || state.isFadingOut) {
+      return;
+    }
+
+    playNextTrack().catch(() => {
+      state.isPlaying = false;
+      state.isCrossfading = false;
+      render();
+    });
   });
 });
 
-audio.volume = state.targetVolume;
-setAudioSource(getCurrentTrack());
+getActiveAudio().volume = state.targetVolume;
+setAudioSource(getActiveAudio(), state.currentIndex);
 render();

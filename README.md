@@ -1,8 +1,8 @@
 # AI Lullaby Radio
 
-AI Lullaby Radio is a local sleep-radio MVP for calm, predictable bedtime listening.
+AI Lullaby Radio is a sleep-radio MVP for calm, predictable bedtime listening.
 
-The app is now implemented as a small frontend-only Vite/TypeScript site. It plays the local MP3 catalog from `music/`, shows the current and next track, supports play/pause, a next-track control, protected volume, and a sleep timer with a gentle fade-out before stopping.
+The app is implemented as a small frontend-only Vite/TypeScript site. It plays the bundled lullaby catalog from `music/`, keeps track names out of the visible UI, supports play/pause, a gentle next-track control, protected volume, a sleep timer, and smooth fades around playback changes.
 
 The visible app UI is Russian-language, with calm wording and no medical or therapeutic claims.
 
@@ -49,12 +49,12 @@ Deployment is handled by `.github/workflows/deploy-pages.yml` after pushes to `m
 ## Current Features
 
 - Minimal mobile-first sleep-radio interface.
-- Local playback of MP3 files from `music/`.
-- Current track and next track display.
+- Playback of bundled MP3 files from `music/`.
+- Parent-friendly Russian UI that hides track names and internal catalog details.
 - Deterministic, controlled catalog order instead of high-contrast random shuffle.
 - Play/pause and next-track controls.
 - Sleep timer options: 10, 20, 30, 45, and 60 minutes.
-- Fade-in on playback start and fade-out before timer stop.
+- Fade-in on playback start, fade-out before pause/timer stop, and crossfade between tracks.
 - Volume control capped at a protected maximum to reduce sudden loudness jumps.
 - Track metadata in `src/data/tracks.json`.
 
