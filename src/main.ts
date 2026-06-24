@@ -1,4 +1,4 @@
-import { catalogSummary, tracks } from "./catalog";
+import { tracks } from "./catalog";
 import "./styles.css";
 
 const TIMER_OPTIONS_MINUTES = [10, 20, 30, 45, 60] as const;
@@ -20,6 +20,8 @@ type PlayerState = {
   targetVolume: number;
   timerEndsAt: number | null;
   remainingMs: number | null;
+  playbackStartedAt: number | null;
+  playbackElapsedMs: number;
   isFadingOut: boolean;
   isCrossfading: boolean;
 };
@@ -56,11 +58,14 @@ const state: PlayerState = {
   targetVolume: clamp(storedState.volume ?? DEFAULT_VOLUME, 0, MAX_VOLUME),
   timerEndsAt: null,
   remainingMs: null,
+  playbackStartedAt: null,
+  playbackElapsedMs: 0,
   isFadingOut: false,
   isCrossfading: false,
 };
 
 let timerInterval: number | null = null;
+let playbackInterval: number | null = null;
 let activeAudioIndex = 0;
 let transitionToken = 0;
 const volumeRampIntervals = new WeakMap<HTMLAudioElement, number>();
@@ -85,6 +90,15 @@ const formatRemaining = (milliseconds: number | null) => {
   }
 
   const totalSeconds = Math.max(0, Math.ceil(milliseconds / 1000));
+  const minutes = Math.floor(totalSeconds / 60)
+    .toString()
+    .padStart(2, "0");
+  const seconds = (totalSeconds % 60).toString().padStart(2, "0");
+  return `${minutes}:${seconds}`;
+};
+
+const formatPlaybackTime = (milliseconds: number) => {
+  const totalSeconds = Math.max(0, Math.floor(milliseconds / 1000));
   const minutes = Math.floor(totalSeconds / 60)
     .toString()
     .padStart(2, "0");
@@ -142,6 +156,37 @@ const stopAndResetAudio = (player: HTMLAudioElement, shouldResetPosition = true)
   }
 };
 
+const clearPlaybackInterval = () => {
+  if (playbackInterval !== null) {
+    window.clearInterval(playbackInterval);
+    playbackInterval = null;
+  }
+};
+
+const updatePlaybackElapsed = () => {
+  if (state.playbackStartedAt === null) {
+    return;
+  }
+
+  state.playbackElapsedMs = Date.now() - state.playbackStartedAt;
+  render();
+};
+
+const startPlaybackClock = () => {
+  state.playbackStartedAt = Date.now() - state.playbackElapsedMs;
+  clearPlaybackInterval();
+  playbackInterval = window.setInterval(updatePlaybackElapsed, 1000);
+};
+
+const stopPlaybackClock = (shouldReset: boolean) => {
+  clearPlaybackInterval();
+  state.playbackStartedAt = null;
+
+  if (shouldReset) {
+    state.playbackElapsedMs = 0;
+  }
+};
+
 const render = () => {
   const playbackStatus = state.isFadingOut
     ? "Плавно затихает"
@@ -164,7 +209,22 @@ const render = () => {
         <h2>Спокойная музыка</h2>
         <p class="muted">Мягкие переходы без резких пауз и скачков громкости.</p>
       </div>
-      <div class="status-pill">${playbackStatus}</div>
+      <div class="playback-visual ${state.isPlaying ? "is-playing" : ""}" aria-label="${playbackStatus}">
+        <div class="status-pill">${playbackStatus}</div>
+        <div class="sleep-waves" aria-hidden="true">
+          <span></span>
+          <span></span>
+          <span></span>
+        </div>
+      </div>
+    </section>
+
+    <section class="card playback-time" aria-label="Время проигрывания">
+      <div>
+        <p class="label">Проигрывание</p>
+        <p class="timer-value">${formatPlaybackTime(state.playbackElapsedMs)}</p>
+      </div>
+      <p class="muted">${state.isPlaying ? "Музыка звучит спокойно." : "Счётчик пойдёт после запуска музыки."}</p>
     </section>
 
     <section class="controls card" aria-label="Управление воспроизведением">
@@ -207,12 +267,6 @@ const render = () => {
         ).join("")}
       </div>
     </section>
-
-    <section class="card catalog" aria-label="Каталог">
-      <p class="label">Набор музыки</p>
-      <p>Набор колыбельных готов: ${catalogSummary.availableTrackCount} спокойных композиций.</p>
-      <p class="muted">Названия скрыты, чтобы экран оставался простым и не отвлекал перед сном.</p>
-    </section>
   `;
 
   bindControls();
@@ -238,6 +292,7 @@ const playCurrentTrack = async () => {
   }
 
   state.isPlaying = true;
+  startPlaybackClock();
   rampVolume(player, state.targetVolume, FADE_IN_MS);
   persistState();
   render();
@@ -279,6 +334,7 @@ const fadeOutAndStop = ({
     stopAndResetAudio(player, resetPosition);
     state.isPlaying = false;
     state.isFadingOut = false;
+    stopPlaybackClock(clearTimer && resetPosition);
     if (clearTimer) {
       state.timerEndsAt = null;
       state.remainingMs = null;
